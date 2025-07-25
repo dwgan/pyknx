@@ -4,13 +4,14 @@ import threading
 import tkinter as tk
 from tkinter import ttk
 from xknx import XKNX
-from xknx.io import ConnectionConfig, GatewayScanner
+from xknx.io import ConnectionConfig, GatewayScanner, ConnectionType  # 添加ConnectionType导入
 from xknx.dpt import DPTBinary
 from xknx.telegram import GroupAddress, Telegram
 from xknx.telegram.apci import GroupValueWrite
 import logging
 import time
-import re  # 添加正则表达式模块用于IP验证
+import re
+import netifaces
 
 # 配置日志记录
 logging.basicConfig(level=logging.DEBUG)
@@ -21,7 +22,7 @@ class KNXControllerApp:
     def __init__(self, root):
         self.root = root
         self.root.title("KNX控制器")
-        self.root.geometry("600x550")  # 增加高度以容纳进度条
+        self.root.geometry("600x550")
         self.root.resizable(True, True)
 
         # 创建主框架
@@ -46,20 +47,18 @@ class KNXControllerApp:
         """获取所有本地IP地址"""
         ips = []
         try:
-            # 获取所有网络接口信息
-            hostname = socket.gethostname()
-            ip_list = socket.getaddrinfo(hostname, None)
-
-            # 提取IPv4地址
-            for item in ip_list:
-                if item[0] == socket.AF_INET:  # IPv4
-                    ip = item[4][0]
-                    if ip != "127.0.0.1":  # 排除回环地址
-                        ips.append(ip)
+            # 使用netifaces获取所有网络接口信息
+            interfaces = netifaces.interfaces()
+            for interface in interfaces:
+                ifaddresses = netifaces.ifaddresses(interface)
+                if netifaces.AF_INET in ifaddresses:
+                    for link in ifaddresses[netifaces.AF_INET]:
+                        ip = link['addr']
+                        if ip != "127.0.0.1":  # 排除回环地址
+                            ips.append(ip)
         except Exception as e:
             logger.error(f"获取IP地址失败: {e}")
             ips = ["192.168.0.24"]  # 默认值
-
         return ips
 
     def create_ui(self):
@@ -276,7 +275,11 @@ class KNXControllerApp:
         self.update_progress()
 
         # 在新线程中运行扫描
-        threading.Thread(target=self.scan_network, daemon=True).start()
+        threading.Thread(
+            target=self.scan_network,
+            args=(self.selected_local_ip,),  # 传递选择的本地IP
+            daemon=True
+        ).start()
 
     def update_progress(self):
         """更新扫描进度条"""
@@ -297,18 +300,28 @@ class KNXControllerApp:
         if self.scan_progress < 100:
             self.root.after(100, self.update_progress)
 
-    def scan_network(self):
+    def scan_network(self, local_ip):
         """扫描网络中的KNX路由器"""
 
         async def scan():
             try:
-                # 创建XKNX实例
-                async with XKNX() as xknx:
+                # 创建连接配置，强制使用指定的本地IP
+                connection_config = ConnectionConfig(
+                    local_ip=local_ip,
+                    gateway_ip=None,  # 扫描时不需要指定网关IP
+                    gateway_port=None,
+                    auto_reconnect=False,
+                    auto_reconnect_wait=3,
+                    connection_type=ConnectionType.TUNNELING,  # 使用ConnectionType枚举
+                )
+
+                # 创建XKNX实例，使用指定的连接配置
+                async with XKNX(connection_config=connection_config) as xknx:
                     # 创建网关扫描器
                     gateway_scanner = GatewayScanner(xknx)
 
                     # 强制使用选择的接口
-                    gateway_scanner.local_ip = self.selected_local_ip
+                    gateway_scanner.local_ip = local_ip
 
                     # 禁用自动接口选择
                     gateway_scanner.bind_to_multicast = False
